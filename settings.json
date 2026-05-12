@@ -1,0 +1,15 @@
+{
+  "iconName": "rotate-cw",
+  "showTransformInTooltip": true,
+  "showSuccessToast": true,
+  "autoTabletBarDensity": true,
+  "exclusiveDockInTabletMode": false,
+  "autoRotateInTabletMode": true,
+  "flipVerticalSensorOrientation": false,
+  "buttonBehavior": "toggle-auto-rotate-lock",
+  "tabletBarDensity": "spacious",
+  "tabletModeStateFile": "/tmp/noctalia-tablet-mode",
+  "lastNonTabletBarDensity": "",
+  "lastNonTabletDockType": "",
+  "lastNonTabletDockEnabled": true
+}
