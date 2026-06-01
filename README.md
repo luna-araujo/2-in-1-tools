@@ -11,6 +11,7 @@ The goal of this plugin is to collect small but useful tools that improve the 2-
 - Rotation state refresh and settings access from the bar widget menu
 - Per-plugin settings for icon and tooltip behavior
 - Optional tablet-mode auto-rotate for the internal display
+- Optional sensor auto-rotate outside tablet mode
 - Configurable primary button behavior for auto-rotate lock or manual rotation
 - Hyprland touchscreen transform sync after display rotation
 
@@ -95,6 +96,7 @@ Then open the plugin settings in Noctalia and enable:
 - `Auto-switch bar density in tablet mode`
 - `Use exclusive dock in tablet mode`
 - `Auto-rotate screen in tablet mode`
+- `Allow auto-rotate outside tablet mode` if you want sensor rotation even while tablet mode is off
 - `Bar and Control Center button behavior`
 - `Flip vertical sensor orientation` if your laptop reports `left-up` and `right-up` reversed
 - `Tablet mode bar density`
@@ -102,7 +104,7 @@ Then open the plugin settings in Noctalia and enable:
 The plugin will save your normal bar density, switch to the configured tablet density when tablet mode is detected, and restore the previous density when tablet mode ends.
 If `Use exclusive dock in tablet mode` is enabled, the plugin will also save the current dock state, enable the dock if it was off, switch it to exclusive mode during tablet mode, and restore the previous dock settings afterward.
 
-If auto-rotate is enabled, the plugin also starts `monitor-sensor --accel` while tablet mode is `on`, maps the reported orientation to output transforms, and restores the previous transform when tablet mode ends. Auto-rotate only targets the internal panel:
+If auto-rotate is enabled, the plugin starts `monitor-sensor --accel` while tablet mode is `on`, maps the reported orientation to output transforms, and restores the previous transform when tablet mode ends. If `Allow auto-rotate outside tablet mode` is enabled, the same sensor rotation is available even while tablet mode is `off`. Auto-rotate only targets the internal panel:
 
 - outputs starting with `eDP`, `LVDS`, or `DSI`,
 - or the only connected output if there is exactly one.
@@ -123,6 +125,8 @@ The main bar and Control Center button can be configured in two modes:
 
 - `Toggle auto-rotate / lock rotation` (default): while tablet-mode auto-rotate is active, clicking the button locks the current orientation or re-enables auto-rotate.
 - `Rotate manually`: clicking the button cycles the current output transform directly.
+
+When the button is set to `Toggle auto-rotate / lock rotation`, it is hidden outside tablet mode unless `Allow auto-rotate outside tablet mode` is enabled. When tablet-mode auto-rotate ends, the display is restored to `normal`.
 
 Manual rotation remains available through the bar widget context menu either way.
 

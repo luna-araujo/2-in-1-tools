@@ -23,6 +23,7 @@ NIconButton {
     readonly property bool showTransformInTooltip: cfg.showTransformInTooltip ?? defaults.showTransformInTooltip ?? true
 
     icon: backend?.buttonUsesManualRotate() ? configuredIcon : (backend?.buttonIconName() ?? "screen-rotation")
+    visible: backend?.buttonVisible(outputName) ?? false
     enabled: backend?.buttonEnabled(outputName) ?? false
     tooltipText: backend?.buttonUsesManualRotate()
         ? (showTransformInTooltip

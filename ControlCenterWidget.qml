@@ -11,6 +11,7 @@ NIconButtonHot {
     readonly property string currentTransform: backend?.transformForOutput(outputName) ?? "Normal"
 
     icon: backend?.buttonIconName() ?? "rotate-cw"
+    visible: backend?.buttonVisible(outputName) ?? false
     enabled: backend?.buttonEnabled(outputName) ?? false
     tooltipText: backend?.buttonTooltip(outputName) ?? ("Rotate display · Current: " + (backend?.transformLabel(currentTransform) ?? "Normal"))
 

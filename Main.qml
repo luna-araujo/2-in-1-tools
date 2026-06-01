@@ -23,6 +23,7 @@ Item {
     readonly property bool autoTabletBarDensity: cfg.autoTabletBarDensity ?? defaults.autoTabletBarDensity ?? false
     readonly property bool exclusiveDockInTabletMode: cfg.exclusiveDockInTabletMode ?? defaults.exclusiveDockInTabletMode ?? false
     readonly property bool autoRotateInTabletMode: cfg.autoRotateInTabletMode ?? defaults.autoRotateInTabletMode ?? false
+    readonly property bool autoRotateOutsideTabletMode: cfg.autoRotateOutsideTabletMode ?? defaults.autoRotateOutsideTabletMode ?? false
     readonly property bool syncHyprTouchTransform: cfg.syncHyprTouchTransform ?? defaults.syncHyprTouchTransform ?? true
     readonly property bool flipVerticalSensorOrientation: cfg.flipVerticalSensorOrientation ?? defaults.flipVerticalSensorOrientation ?? false
     readonly property string buttonBehavior: cfg.buttonBehavior ?? defaults.buttonBehavior ?? "toggle-auto-rotate-lock"
@@ -34,7 +35,7 @@ Item {
     property bool _tabletDensityManaged: false
     property bool _tabletDockManaged: false
     property bool _tabletModeDetected: false
-    property bool _autoRotateLocked: false
+    property bool _rotationLocked: false
     property string _autoRotateOutputName: ""
     property string _autoRotateSavedTransform: ""
     property string _autoRotatePendingTransform: ""
@@ -203,6 +204,7 @@ Item {
     }
 
     function _syncTabletModeState(active) {
+        root._log("tablet mode state: " + (active ? "on" : "off"))
         root._tabletModeDetected = active
 
         if (!root.autoTabletBarDensity) {
@@ -286,15 +288,24 @@ Item {
         if (parts.length < 2)
             return
 
-        var stateToken = parts[parts.length - 1]
-        var switchName = parts.slice(0, parts.length - 1).join(",").trim()
+        root._log("hypr switch event: " + payload)
+
+        var firstState = root._parseStateBool(parts[0])
+        var lastState = root._parseStateBool(parts[parts.length - 1])
+        var state = firstState !== null ? firstState : lastState
+        var switchName = firstState !== null
+            ? parts.slice(1).join(",").trim()
+            : parts.slice(0, parts.length - 1).join(",").trim()
+
         if (!root._isTabletSwitchName(switchName))
             return
 
-        var state = root._parseStateBool(stateToken)
-        if (state === null)
+        if (state === null) {
+            root._log("hypr switch event ignored; no state parsed for " + switchName)
             return
+        }
 
+        root._log("hypr tablet switch parsed: " + switchName + "=" + (state ? "on" : "off"))
         root._syncTabletModeState(state)
     }
 
@@ -373,7 +384,7 @@ Item {
         for (var i = 0; i < switches.length; ++i) {
             var sw = switches[i]
             var name = ((sw && sw.name) ? sw.name : "").toString().toLowerCase()
-            if (!name || name.indexOf("tablet") === -1)
+            if (!root._isTabletSwitchName(name))
                 continue
 
             foundTabletSwitch = true
@@ -669,7 +680,7 @@ Item {
         var normalized = root._normalizeTransform(transform)
         if (!root._autoRotateSessionActive || !root._autoRotateOutputName)
             return
-        if (root._autoRotateLocked)
+        if (root._rotationLocked)
             return
         if (normalized === root._autoRotateLastAppliedTransform)
             return
@@ -682,12 +693,13 @@ Item {
         if (orientationProc.running)
             return
 
+        root._log("starting monitor-sensor for auto-rotate")
         orientationProc.command = ["monitor-sensor", "--accel"]
         orientationProc.running = true
     }
 
     function _pollCurrentOrientation() {
-        if (!root._tabletModeDetected || !root.autoRotateInTabletMode || !root._autoRotateSessionActive || root._autoRotateLocked)
+        if (!root._shouldAutoRotate() || !root._autoRotateSessionActive || root._rotationLocked)
             return
         if (orientationPollProc.running)
             return
@@ -713,9 +725,10 @@ Item {
         root._autoRotateSavedTransform = root.transformForOutput(outputName)
         root._autoRotateLastAppliedTransform = root._autoRotateSavedTransform
         root._autoRotatePendingTransform = ""
-        root._autoRotateLocked = false
         root._autoRotateSessionActive = true
-        root._startOrientationMonitor()
+        root._log("auto-rotate session started; output=" + outputName + "; locked=" + root._rotationLocked + "; saved=" + root._autoRotateSavedTransform)
+        if (!root._rotationLocked)
+            root._startOrientationMonitor()
     }
 
     function _applyTransform(outputName, target, shouldShowSuccessToast, shouldShowErrorToast) {
@@ -758,21 +771,25 @@ Item {
         }
 
         var outputName = root._autoRotateOutputName
-        var restoreTransform = root._autoRotateSavedTransform || "Normal"
+        var restoreTransform = root.autoRotateOutsideTabletMode ? (root._autoRotateSavedTransform || "Normal") : "Normal"
+        root._log("auto-rotate session ended; output=" + outputName + "; restore=" + restoreTransform)
 
         root._autoRotateSessionActive = false
         root._autoRotateOutputName = ""
         root._autoRotateSavedTransform = ""
         root._autoRotatePendingTransform = ""
         root._autoRotateLastAppliedTransform = ""
-        root._autoRotateLocked = false
 
         root._autoRotateRestoreOutputName = outputName
         root._autoRotateRestoreTransform = restoreTransform
     }
 
+    function _shouldAutoRotate() {
+        return root.autoRotateInTabletMode && (root._tabletModeDetected || root.autoRotateOutsideTabletMode)
+    }
+
     function _syncAutoRotateLifecycle() {
-        var shouldAutoRotate = root._tabletModeDetected && root.autoRotateInTabletMode
+        var shouldAutoRotate = root._shouldAutoRotate()
 
         if (!shouldAutoRotate) {
             if (root._autoRotateRestoreOutputName && !applyProc.running) {
@@ -801,7 +818,7 @@ Item {
             return
         }
 
-        if (root._autoRotateLocked) {
+        if (root._rotationLocked) {
             root._stopOrientationMonitor()
             return
         }
@@ -843,7 +860,7 @@ Item {
     function buttonIconName() {
         if (root.buttonUsesManualRotate())
             return "rotate-cw"
-        return root._autoRotateLocked ? "lock-square" : "rotate-clockwise"
+        return root._rotationLocked ? "lock-square" : "rotate-clockwise"
     }
 
     function buttonTooltip(outputName) {
@@ -853,18 +870,30 @@ Item {
         }
 
         if (!root.autoRotateInTabletMode)
-            return "Enable Auto-rotate screen in tablet mode in plugin settings"
-        if (!root._tabletModeDetected)
-            return "Auto-rotate toggle is available in tablet mode"
+            return root._rotationLocked
+                ? "Rotation locked"
+                : "Rotation unlocked"
+        if (!root._tabletModeDetected && !root.autoRotateOutsideTabletMode)
+            return root._rotationLocked
+                ? "Rotation locked"
+                : "Rotation unlocked"
         if (!root._autoRotateOutputName)
             return "Auto-rotate is unavailable because no internal display was detected"
-        return root._autoRotateLocked ? "Rotation locked" : "Auto-rotate enabled"
+        return root._rotationLocked ? "Rotation locked" : "Auto-rotate enabled"
     }
 
     function buttonEnabled(outputName) {
         if (root.buttonUsesManualRotate())
             return root._isBackendSupported() && !!outputName && !root.isBusy(outputName)
-        return root._isBackendSupported() && !applyProc.running
+        return root.buttonVisible(outputName)
+    }
+
+    function buttonVisible(outputName) {
+        if (root.buttonUsesManualRotate())
+            return true
+        return root._isBackendSupported()
+            && root.autoRotateInTabletMode
+            && (root._tabletModeDetected || root.autoRotateOutsideTabletMode)
     }
 
     function activatePrimaryButton(outputName) {
@@ -877,12 +906,12 @@ Item {
     }
 
     function toggleAutoRotateLock() {
-        if (!root.autoRotateInTabletMode || !root._tabletModeDetected || !root._autoRotateOutputName)
-            return
+        root._rotationLocked = !root._rotationLocked
+        root._log("rotation lock toggled: " + (root._rotationLocked ? "locked" : "unlocked"))
 
-        root._autoRotateLocked = !root._autoRotateLocked
-        if (!root._autoRotateLocked) {
-            root._requestOutputs("refresh-output", root._autoRotateOutputName)
+        if (!root._rotationLocked) {
+            if (root._autoRotateOutputName)
+                root._requestOutputs("refresh-output", root._autoRotateOutputName)
             root._pollCurrentOrientation()
         }
         root._syncAutoRotateLifecycle()
@@ -1150,8 +1179,13 @@ Item {
 
     Process {
         id: orientationProc
+        stderr: StdioCollector {}
         stdout: SplitParser {
             onRead: data => {
+                var line = (data || "").toString().trim()
+                if (line)
+                    root._log("monitor-sensor output: " + line)
+
                 var orientation = root._extractOrientationFromText(data)
                 if (!orientation)
                     return
@@ -1160,11 +1194,14 @@ Item {
                 if (!target)
                     return
 
+                root._log("monitor-sensor orientation parsed: " + orientation + " -> " + target)
                 root._setAutoRotatePendingTransform(target)
             }
         }
         onExited: (exitCode, exitStatus) => {
-            if (root._tabletModeDetected && root.autoRotateInTabletMode && root._autoRotateSessionActive)
+            var detail = orientationProc.stderr.text.trim()
+            root._log("monitor-sensor exited; code=" + exitCode + (detail ? "; stderr=" + detail : ""))
+            if (root._shouldAutoRotate() && root._autoRotateSessionActive)
                 root._startOrientationMonitor()
         }
     }
@@ -1174,6 +1211,7 @@ Item {
         stdout: StdioCollector {}
 
         onExited: (exitCode, exitStatus) => {
+            root._log("orientation poll exited; code=" + exitCode)
             if (exitCode !== 0)
                 return
 
@@ -1185,11 +1223,13 @@ Item {
             if (!target)
                 return
 
+            root._log("orientation poll parsed: " + orientation + " -> " + target)
             root._setAutoRotatePendingTransform(target)
         }
     }
 
     onAutoRotateInTabletModeChanged: root._syncAutoRotateLifecycle()
+    onAutoRotateOutsideTabletModeChanged: root._syncAutoRotateLifecycle()
     onTabletModeStateFileChanged: {
         root._syncNiriStateFileWatcher()
         root.refreshTabletModeState()

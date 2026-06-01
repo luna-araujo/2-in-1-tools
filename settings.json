@@ -5,6 +5,7 @@
   "autoTabletBarDensity": true,
   "exclusiveDockInTabletMode": false,
   "autoRotateInTabletMode": true,
+  "autoRotateOutsideTabletMode": false,
   "syncHyprTouchTransform": true,
   "flipVerticalSensorOrientation": false,
   "buttonBehavior": "toggle-auto-rotate-lock",

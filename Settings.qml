@@ -18,6 +18,7 @@ ColumnLayout {
     property bool editAutoTabletBarDensity: cfg.autoTabletBarDensity ?? defaults.autoTabletBarDensity ?? false
     property bool editExclusiveDockInTabletMode: cfg.exclusiveDockInTabletMode ?? defaults.exclusiveDockInTabletMode ?? false
     property bool editAutoRotateInTabletMode: cfg.autoRotateInTabletMode ?? defaults.autoRotateInTabletMode ?? false
+    property bool editAutoRotateOutsideTabletMode: cfg.autoRotateOutsideTabletMode ?? defaults.autoRotateOutsideTabletMode ?? false
     property bool editSyncHyprTouchTransform: cfg.syncHyprTouchTransform ?? defaults.syncHyprTouchTransform ?? true
     property bool editFlipVerticalSensorOrientation: cfg.flipVerticalSensorOrientation ?? defaults.flipVerticalSensorOrientation ?? false
     property string editButtonBehavior: cfg.buttonBehavior ?? defaults.buttonBehavior ?? "toggle-auto-rotate-lock"
@@ -130,6 +131,18 @@ ColumnLayout {
 
     NToggle {
         Layout.fillWidth: true
+        visible: root.editAutoRotateInTabletMode
+        label: "Allow auto-rotate outside tablet mode"
+        description: "Keep sensor-based auto-rotation available even when tablet mode is not active."
+        checked: root.editAutoRotateOutsideTabletMode
+        onToggled: checked => {
+            root.editAutoRotateOutsideTabletMode = checked
+            root.saveSettings()
+        }
+    }
+
+    NToggle {
+        Layout.fillWidth: true
         label: "Hyprland: sync touchscreen transform"
         description: "After rotating a display on Hyprland, also rotate mapped touchscreen coordinates for matching touch devices."
         checked: root.editSyncHyprTouchTransform
@@ -191,6 +204,7 @@ ColumnLayout {
         pluginApi.pluginSettings.autoTabletBarDensity = root.editAutoTabletBarDensity
         pluginApi.pluginSettings.exclusiveDockInTabletMode = root.editExclusiveDockInTabletMode
         pluginApi.pluginSettings.autoRotateInTabletMode = root.editAutoRotateInTabletMode
+        pluginApi.pluginSettings.autoRotateOutsideTabletMode = root.editAutoRotateOutsideTabletMode
         pluginApi.pluginSettings.syncHyprTouchTransform = root.editSyncHyprTouchTransform
         pluginApi.pluginSettings.flipVerticalSensorOrientation = root.editFlipVerticalSensorOrientation
         pluginApi.pluginSettings.buttonBehavior = root.editButtonBehavior
