@@ -18,6 +18,7 @@ ColumnLayout {
     property bool editAutoTabletBarDensity: cfg.autoTabletBarDensity ?? defaults.autoTabletBarDensity ?? false
     property bool editExclusiveDockInTabletMode: cfg.exclusiveDockInTabletMode ?? defaults.exclusiveDockInTabletMode ?? false
     property bool editAutoRotateInTabletMode: cfg.autoRotateInTabletMode ?? defaults.autoRotateInTabletMode ?? false
+    property bool editSyncHyprTouchTransform: cfg.syncHyprTouchTransform ?? defaults.syncHyprTouchTransform ?? true
     property bool editFlipVerticalSensorOrientation: cfg.flipVerticalSensorOrientation ?? defaults.flipVerticalSensorOrientation ?? false
     property string editButtonBehavior: cfg.buttonBehavior ?? defaults.buttonBehavior ?? "toggle-auto-rotate-lock"
     property string editTabletBarDensity: cfg.tabletBarDensity ?? defaults.tabletBarDensity ?? "default"
@@ -97,7 +98,7 @@ ColumnLayout {
     NToggle {
         Layout.fillWidth: true
         label: "Auto-switch bar density in tablet mode"
-        description: "When Niri reports tablet mode, switch Noctalia's bar density automatically."
+        description: "When tablet mode is active, switch Noctalia's bar density automatically."
         checked: root.editAutoTabletBarDensity
         onToggled: checked => {
             root.editAutoTabletBarDensity = checked
@@ -123,6 +124,17 @@ ColumnLayout {
         checked: root.editAutoRotateInTabletMode
         onToggled: checked => {
             root.editAutoRotateInTabletMode = checked
+            root.saveSettings()
+        }
+    }
+
+    NToggle {
+        Layout.fillWidth: true
+        label: "Hyprland: sync touchscreen transform"
+        description: "After rotating a display on Hyprland, also rotate mapped touchscreen coordinates for matching touch devices."
+        checked: root.editSyncHyprTouchTransform
+        onToggled: checked => {
+            root.editSyncHyprTouchTransform = checked
             root.saveSettings()
         }
     }
@@ -179,6 +191,7 @@ ColumnLayout {
         pluginApi.pluginSettings.autoTabletBarDensity = root.editAutoTabletBarDensity
         pluginApi.pluginSettings.exclusiveDockInTabletMode = root.editExclusiveDockInTabletMode
         pluginApi.pluginSettings.autoRotateInTabletMode = root.editAutoRotateInTabletMode
+        pluginApi.pluginSettings.syncHyprTouchTransform = root.editSyncHyprTouchTransform
         pluginApi.pluginSettings.flipVerticalSensorOrientation = root.editFlipVerticalSensorOrientation
         pluginApi.pluginSettings.buttonBehavior = root.editButtonBehavior
         pluginApi.pluginSettings.tabletBarDensity = root.editTabletBarDensity

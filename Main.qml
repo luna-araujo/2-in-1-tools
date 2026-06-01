@@ -9,6 +9,7 @@ Item {
 
     property var pluginApi: null
     property var transformsByOutput: ({})
+    property var hyprMonitorStateByOutput: ({})
     property var busyByOutput: ({})
     property string _queryReason: ""
     property string _queryOutputName: ""
@@ -22,6 +23,7 @@ Item {
     readonly property bool autoTabletBarDensity: cfg.autoTabletBarDensity ?? defaults.autoTabletBarDensity ?? false
     readonly property bool exclusiveDockInTabletMode: cfg.exclusiveDockInTabletMode ?? defaults.exclusiveDockInTabletMode ?? false
     readonly property bool autoRotateInTabletMode: cfg.autoRotateInTabletMode ?? defaults.autoRotateInTabletMode ?? false
+    readonly property bool syncHyprTouchTransform: cfg.syncHyprTouchTransform ?? defaults.syncHyprTouchTransform ?? true
     readonly property bool flipVerticalSensorOrientation: cfg.flipVerticalSensorOrientation ?? defaults.flipVerticalSensorOrientation ?? false
     readonly property string buttonBehavior: cfg.buttonBehavior ?? defaults.buttonBehavior ?? "toggle-auto-rotate-lock"
     readonly property string tabletBarDensity: cfg.tabletBarDensity ?? defaults.tabletBarDensity ?? "default"
@@ -40,14 +42,52 @@ Item {
     property string _autoRotateRestoreOutputName: ""
     property string _autoRotateRestoreTransform: ""
     property bool _autoRotateSessionActive: false
+    property string compositorBackend: "unknown"
+    property bool _backendUnsupportedNotified: false
+    property string _hyprEventBuffer: ""
+    property string _hyprTouchQueuedOutputName: ""
+    property string _hyprTouchQueuedTarget: ""
+    property string _hyprTouchActiveOutputName: ""
+    property string _hyprTouchActiveTarget: ""
+    property var _hyprTouchApplyNames: []
+    property int _hyprTouchApplyIndex: 0
+    property var _hyprTouchFailedNames: []
+
 
     function _copyMap(map) {
         return Object.assign({}, map || {})
     }
 
+    function _backendName() {
+        switch (root.compositorBackend) {
+        case "hyprland": return "Hyprland"
+        case "niri": return "Niri"
+        default: return "unknown compositor"
+        }
+    }
+
+    function _isBackendSupported() {
+        return root.compositorBackend === "niri" || root.compositorBackend === "hyprland"
+    }
+
+    function _notifyUnsupportedBackendOnce() {
+        if (root._backendUnsupportedNotified)
+            return
+        root._backendUnsupportedNotified = true
+        ToastService.showError("2-in-1-tools supports Niri and Hyprland only")
+    }
+
     function _normalizeTransform(transform) {
         var value = (transform || "").toString().trim().toLowerCase()
         switch (value) {
+        case "0":
+            return "Normal"
+        case "1":
+            return "90"
+        case "2":
+            return "180"
+        case "3":
+            return "270"
         case "90":
         case "180":
         case "270":
@@ -167,14 +207,168 @@ Item {
         if (tabletModeProc.running)
             return
 
-        tabletModeProc.command = [
+        if (root.compositorBackend === "hyprland") {
+            tabletModeProc.command = [
+                "sh",
+                "-c",
+                "if [ -f \"$1\" ]; then cat \"$1\"; elif command -v hyprctl >/dev/null 2>&1; then hyprctl -j devices; else printf unknown; fi",
+                "2-in-1-tools",
+                root.tabletModeStateFile
+            ]
+        } else {
+            tabletModeProc.command = [
+                "sh",
+                "-c",
+                "if [ -f \"$1\" ]; then cat \"$1\"; else printf off; fi",
+                "2-in-1-tools",
+                root.tabletModeStateFile
+            ]
+        }
+        tabletModeProc.running = true
+    }
+
+    function _parseStateBool(value) {
+        if (typeof value === "boolean")
+            return value
+        if (typeof value === "number")
+            return value !== 0
+        if (typeof value !== "string")
+            return null
+
+        var lowered = value.trim().toLowerCase()
+        if (lowered === "on" || lowered === "true" || lowered === "1" || lowered === "open")
+            return true
+        if (lowered === "off" || lowered === "false" || lowered === "0" || lowered === "closed")
+            return false
+        return null
+    }
+
+    function _isTabletSwitchName(name) {
+        var lowered = (name || "").toString().trim().toLowerCase()
+        if (!lowered)
+            return false
+        return lowered.indexOf("tablet") !== -1 || lowered.indexOf("intel hid switches") !== -1
+    }
+
+    function _handleHyprEventLine(line) {
+        var text = (line || "").trim()
+        if (!text || text.indexOf("switch>>") !== 0)
+            return
+
+        var payload = text.slice(8)
+        var parts = payload.split(",")
+        if (parts.length < 2)
+            return
+
+        var stateToken = parts[parts.length - 1]
+        var switchName = parts.slice(0, parts.length - 1).join(",").trim()
+        if (!root._isTabletSwitchName(switchName))
+            return
+
+        var state = root._parseStateBool(stateToken)
+        if (state === null)
+            return
+
+        root._syncTabletModeState(state)
+    }
+
+    function _processHyprEventData(data) {
+        if (!data)
+            return
+
+        var chunk = data.toString()
+        if (!chunk)
+            return
+
+        root._hyprEventBuffer += chunk
+        var newlineIndex = root._hyprEventBuffer.indexOf("\n")
+        while (newlineIndex !== -1) {
+            var line = root._hyprEventBuffer.slice(0, newlineIndex)
+            if (line.endsWith("\r"))
+                line = line.slice(0, -1)
+            root._handleHyprEventLine(line)
+            root._hyprEventBuffer = root._hyprEventBuffer.slice(newlineIndex + 1)
+            newlineIndex = root._hyprEventBuffer.indexOf("\n")
+        }
+    }
+
+    function _syncHyprEventListener() {
+        if (root.compositorBackend !== "hyprland") {
+            hyprEventProc.running = false
+            root._hyprEventBuffer = ""
+            return
+        }
+
+        if (hyprEventProc.running)
+            return
+
+        root._hyprEventBuffer = ""
+        hyprEventProc.command = [
             "sh",
             "-c",
-            "if [ -f \"$1\" ]; then cat \"$1\"; else printf off; fi",
+            "socket=\"$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock\"; if [ ! -S \"$socket\" ]; then exit 1; fi; if command -v socat >/dev/null 2>&1; then exec socat -u UNIX-CONNECT:\"$socket\" -; elif command -v nc >/dev/null 2>&1; then exec nc -U \"$socket\"; else exit 1; fi"
+        ]
+        hyprEventProc.running = true
+    }
+
+    function _syncNiriStateFileWatcher() {
+        if (root.compositorBackend !== "niri") {
+            niriStateWatchProc.running = false
+            return
+        }
+
+        if (niriStateWatchProc.running)
+            return
+
+        niriStateWatchProc.command = [
+            "sh",
+            "-c",
+            "if ! command -v inotifywait >/dev/null 2>&1; then exit 1; fi; target=\"$1\"; dir=$(dirname \"$target\"); file=$(basename \"$target\"); mkdir -p \"$dir\"; inotifywait -m -e close_write,create,moved_to --format '%f' \"$dir\" | while IFS= read -r changed; do [ \"$changed\" = \"$file\" ] && printf '%s\\n' \"$changed\"; done",
             "2-in-1-tools",
             root.tabletModeStateFile
         ]
-        tabletModeProc.running = true
+        niriStateWatchProc.running = true
+    }
+
+    function _syncTabletModeWatchers() {
+        root._syncHyprEventListener()
+        root._syncNiriStateFileWatcher()
+    }
+
+    function _tabletModeFromHyprDevices(parsed) {
+        if (!parsed || typeof parsed !== "object")
+            return null
+
+        var switches = Array.isArray(parsed.switches) ? parsed.switches : []
+        if (!switches.length)
+            return null
+
+        var foundTabletSwitch = false
+        for (var i = 0; i < switches.length; ++i) {
+            var sw = switches[i]
+            var name = ((sw && sw.name) ? sw.name : "").toString().toLowerCase()
+            if (!name || name.indexOf("tablet") === -1)
+                continue
+
+            foundTabletSwitch = true
+            var state = null
+            var keys = ["state", "status", "enabled", "on", "active", "switchState", "isOn"]
+            for (var j = 0; j < keys.length; ++j) {
+                var key = keys[j]
+                if (sw[key] === undefined)
+                    continue
+                state = root._parseStateBool(sw[key])
+                if (state !== null)
+                    break
+            }
+
+            if (state === true)
+                return true
+        }
+
+        if (foundTabletSwitch)
+            return false
+        return null
     }
 
     function _setBusy(outputName, busy) {
@@ -221,6 +415,177 @@ Item {
         return transform === "Normal" ? "normal" : transform
     }
 
+    function _hyprTransformId(transform) {
+        switch (root._normalizeTransform(transform)) {
+        case "90": return "1"
+        case "180": return "2"
+        case "270": return "3"
+        default: return "0"
+        }
+    }
+
+    function _touchOutputName(device) {
+        if (!device || typeof device !== "object")
+            return ""
+
+        var keys = ["output", "boundOutput", "mappedOutput", "outputName", "bound_output", "mapped_output"]
+        for (var i = 0; i < keys.length; ++i) {
+            var key = keys[i]
+            if (device[key] === undefined || device[key] === null)
+                continue
+            var value = device[key].toString().trim()
+            if (value)
+                return value
+        }
+
+        return ""
+    }
+
+    function _hyprTouchDevices(parsed) {
+        if (!parsed || typeof parsed !== "object")
+            return []
+
+        if (Array.isArray(parsed.touch))
+            return parsed.touch
+
+        var keys = Object.keys(parsed)
+        for (var i = 0; i < keys.length; ++i) {
+            var key = keys[i]
+            if (key.toLowerCase().indexOf("touch") === -1)
+                continue
+            var value = parsed[key]
+            if (Array.isArray(value))
+                return value
+        }
+
+        return []
+    }
+
+    function _matchingHyprTouchNames(devices, outputName) {
+        var names = []
+        var requestedOutput = (outputName || "").toString().trim()
+        var hasBoundMatches = false
+        var unboundNames = []
+
+        for (var i = 0; i < devices.length; ++i) {
+            var device = devices[i]
+            var name = ((device && device.name) ? device.name : "").toString().trim()
+            if (!name)
+                continue
+
+            var boundOutput = root._touchOutputName(device)
+            if (requestedOutput && boundOutput === requestedOutput) {
+                hasBoundMatches = true
+                names.push(name)
+                continue
+            }
+
+            if (!boundOutput)
+                unboundNames.push(name)
+        }
+
+        if (!hasBoundMatches)
+            names = names.concat(unboundNames)
+
+        if (!names.length && devices.length === 1) {
+            var fallbackName = ((devices[0] && devices[0].name) ? devices[0].name : "").toString().trim()
+            if (fallbackName)
+                names.push(fallbackName)
+        }
+
+        var unique = []
+        var seen = ({})
+        for (var j = 0; j < names.length; ++j) {
+            var candidate = names[j]
+            if (!candidate || seen[candidate])
+                continue
+            seen[candidate] = true
+            unique.push(candidate)
+        }
+
+        return unique
+    }
+
+    function _requestHyprTouchTransformSync(outputName, target) {
+        if (root.compositorBackend !== "hyprland" || !root.syncHyprTouchTransform)
+            return
+        if (!outputName)
+            return
+
+        root._hyprTouchQueuedOutputName = outputName
+        root._hyprTouchQueuedTarget = root._normalizeTransform(target)
+        root._syncHyprTouchTransformQueue()
+    }
+
+    function _syncHyprTouchTransformQueue() {
+        if (hyprTouchQueryProc.running || hyprTouchApplyProc.running)
+            return
+        if (!root._hyprTouchQueuedOutputName)
+            return
+
+        root._hyprTouchActiveOutputName = root._hyprTouchQueuedOutputName
+        root._hyprTouchActiveTarget = root._hyprTouchQueuedTarget || "Normal"
+        root._hyprTouchQueuedOutputName = ""
+        root._hyprTouchQueuedTarget = ""
+
+        hyprTouchQueryProc.command = ["hyprctl", "-j", "devices"]
+        hyprTouchQueryProc.running = true
+    }
+
+    function _startNextHyprTouchApply() {
+        if (root._hyprTouchApplyIndex >= root._hyprTouchApplyNames.length)
+            return false
+
+        var name = root._hyprTouchApplyNames[root._hyprTouchApplyIndex]
+        var transformId = root._hyprTransformId(root._hyprTouchActiveTarget)
+        hyprTouchApplyProc.command = ["hyprctl", "keyword", "device[" + name + "]:transform", transformId]
+        hyprTouchApplyProc.running = true
+        return true
+    }
+
+    function _buildQueryCommand() {
+        switch (root.compositorBackend) {
+        case "hyprland":
+            return ["hyprctl", "-j", "monitors"]
+        case "niri":
+            return ["niri", "msg", "--json", "outputs"]
+        default:
+            return []
+        }
+    }
+
+    function _hyprMonitorRule(state, transformId) {
+        if (!state || !state.name)
+            return ""
+
+        var width = state.width > 0 ? state.width : 0
+        var height = state.height > 0 ? state.height : 0
+        var refresh = state.refresh > 0 ? state.refresh : 60
+        var x = state.x || 0
+        var y = state.y || 0
+        var scale = state.scale > 0 ? state.scale : 1
+        var mode = width > 0 && height > 0 ? (width + "x" + height + "@" + refresh) : "preferred"
+        var position = x + "x" + y
+
+        return state.name + "," + mode + "," + position + "," + scale + ",transform," + transformId
+    }
+
+    function _buildApplyCommand(outputName, target) {
+        switch (root.compositorBackend) {
+        case "hyprland": {
+            var state = root.hyprMonitorStateByOutput[outputName]
+            var rule = root._hyprMonitorRule(state, root._hyprTransformId(target))
+            if (!rule)
+                return []
+            return ["hyprctl", "keyword", "monitor", rule]
+        }
+        case "niri":
+            return ["niri", "msg", "output", outputName, "transform", root._transformArg(target)]
+        default:
+            return []
+        }
+    }
+
     function _isInternalOutput(outputName) {
         return /^(eDP|LVDS|DSI)/.test(outputName || "")
     }
@@ -248,13 +613,25 @@ Item {
         }
     }
 
+    function _extractOrientationFromText(text) {
+        var match = /Accelerometer orientation(?: changed)?:\s*([a-z-]+)/i.exec(text || "")
+        return match ? match[1] : ""
+    }
+
     function _requestOutputs(reason, outputName) {
         if (queryProc.running)
             return false
 
+        if (!root._isBackendSupported()) {
+            root._notifyUnsupportedBackendOnce()
+            return false
+        }
+
         root._queryReason = reason || ""
         root._queryOutputName = outputName || ""
-        queryProc.command = ["niri", "msg", "--json", "outputs"]
+        queryProc.command = root._buildQueryCommand()
+        if (!queryProc.command.length)
+            return false
         queryProc.running = true
         return true
     }
@@ -280,6 +657,20 @@ Item {
         orientationProc.running = true
     }
 
+    function _pollCurrentOrientation() {
+        if (!root._tabletModeDetected || !root.autoRotateInTabletMode || !root._autoRotateSessionActive || root._autoRotateLocked)
+            return
+        if (orientationPollProc.running)
+            return
+
+        orientationPollProc.command = [
+            "sh",
+            "-c",
+            "monitor-sensor --accel | while IFS= read -r line; do case \"$line\" in *\"Accelerometer orientation\"*) printf '%s\\n' \"$line\"; break;; esac; done"
+        ]
+        orientationPollProc.running = true
+    }
+
     function _stopOrientationMonitor() {
         if (orientationProc.running)
             orientationProc.running = false
@@ -302,12 +693,23 @@ Item {
         if (!outputName || applyProc.running)
             return false
 
+        if (!root._isBackendSupported()) {
+            root._notifyUnsupportedBackendOnce()
+            return false
+        }
+
         root._applyOutputName = outputName
         root._applyTarget = root._normalizeTransform(target)
         root._applyShouldShowSuccessToast = !!shouldShowSuccessToast
         root._applyShouldShowErrorToast = shouldShowErrorToast !== false
         root._setBusy(outputName, true)
-        applyProc.command = ["niri", "msg", "output", outputName, "transform", root._transformArg(root._applyTarget)]
+        applyProc.command = root._buildApplyCommand(outputName, root._applyTarget)
+        if (!applyProc.command.length) {
+            root._setBusy(outputName, false)
+            if (root._applyShouldShowErrorToast)
+                ToastService.showError("Unable to rotate output on " + root._backendName())
+            return false
+        }
         applyProc.running = true
         return true
     }
@@ -429,8 +831,8 @@ Item {
 
     function buttonEnabled(outputName) {
         if (root.buttonUsesManualRotate())
-            return !!outputName && !root.isBusy(outputName)
-        return !applyProc.running
+            return root._isBackendSupported() && !!outputName && !root.isBusy(outputName)
+        return root._isBackendSupported() && !applyProc.running
     }
 
     function activatePrimaryButton(outputName) {
@@ -447,9 +849,28 @@ Item {
             return
 
         root._autoRotateLocked = !root._autoRotateLocked
-        if (!root._autoRotateLocked)
+        if (!root._autoRotateLocked) {
             root._requestOutputs("refresh-output", root._autoRotateOutputName)
+            root._pollCurrentOrientation()
+        }
         root._syncAutoRotateLifecycle()
+    }
+
+    Process {
+        id: backendDetectProc
+        stdout: StdioCollector {}
+
+        command: ["sh", "-c", "if [ -n \"$HYPRLAND_INSTANCE_SIGNATURE\" ]; then printf hyprland; elif [ -n \"$NIRI_SOCKET\" ]; then printf niri; elif [ -n \"$XDG_CURRENT_DESKTOP\" ] && printf '%s' \"$XDG_CURRENT_DESKTOP\" | grep -qi hypr; then printf hyprland; elif [ -n \"$XDG_CURRENT_DESKTOP\" ] && printf '%s' \"$XDG_CURRENT_DESKTOP\" | grep -qi niri; then printf niri; else printf unknown; fi"]
+
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0)
+                return
+
+            var detected = backendDetectProc.stdout.text.trim().toLowerCase()
+            if (detected !== "hyprland" && detected !== "niri")
+                detected = "unknown"
+            root.compositorBackend = detected
+        }
     }
 
     Process {
@@ -465,19 +886,49 @@ Item {
             }
 
             try {
-                var outputs = JSON.parse(queryProc.stdout.text.trim())
+                var parsed = JSON.parse(queryProc.stdout.text.trim())
+                var outputs = ({})
+                var hyprState = ({})
+
+                if (root.compositorBackend === "hyprland" && Array.isArray(parsed)) {
+                    for (var i = 0; i < parsed.length; ++i) {
+                        var monitor = parsed[i]
+                        if (!monitor || !monitor.name)
+                            continue
+
+                        var transform = monitor.transform
+                        outputs[monitor.name] = {
+                            logical: {
+                                transform: root._normalizeTransform(transform)
+                            }
+                        }
+
+                        hyprState[monitor.name] = {
+                            name: monitor.name,
+                            width: Number(monitor.width) || 0,
+                            height: Number(monitor.height) || 0,
+                            refresh: Number(monitor.refreshRate) || 0,
+                            x: Number(monitor.x) || 0,
+                            y: Number(monitor.y) || 0,
+                            scale: Number(monitor.scale) || 1
+                        }
+                    }
+                    root.hyprMonitorStateByOutput = hyprState
+                } else if (root.compositorBackend === "niri" && parsed && typeof parsed === "object")
+                    outputs = parsed
+
                 var names = Object.keys(outputs)
-                for (var i = 0; i < names.length; ++i) {
-                    var outputName = names[i]
+                for (var j = 0; j < names.length; ++j) {
+                    var outputName = names[j]
                     var output = outputs[outputName]
-                    if (output && output.logical && output.logical.transform)
+                    if (output && output.logical && output.logical.transform !== undefined)
                         root._setTransform(outputName, output.logical.transform)
                 }
 
                 if (root._queryReason === "auto-rotate-start")
                     root._beginAutoRotateSession(root._internalDisplayFromOutputs(outputs))
             } catch (error) {
-                console.warn("2-in-1-tools: failed to parse niri outputs JSON:", error)
+                console.warn("2-in-1-tools: failed to parse outputs JSON:", error)
             } finally {
                 root._queryReason = ""
                 root._queryOutputName = ""
@@ -496,6 +947,7 @@ Item {
 
             if (exitCode === 0) {
                 root._setTransform(outputName, root._applyTarget)
+                root._requestHyprTouchTransformSync(outputName, root._applyTarget)
                 if (root._applyShouldShowSuccessToast)
                     ToastService.showSuccess("Display rotated to " + root.transformLabel(root._applyTarget))
                 root.refreshTransform(outputName)
@@ -506,7 +958,7 @@ Item {
             }
 
             if (root._applyShouldShowErrorToast) {
-                var message = "Failed to rotate output"
+                var message = "Failed to rotate output on " + root._backendName()
                 var detail = applyProc.stderr.text.trim()
                 if (detail)
                     message += ": " + detail
@@ -518,6 +970,71 @@ Item {
     }
 
     Process {
+        id: hyprTouchQueryProc
+        stdout: StdioCollector {}
+
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0) {
+                root._hyprTouchActiveOutputName = ""
+                root._hyprTouchActiveTarget = ""
+                root._syncHyprTouchTransformQueue()
+                return
+            }
+
+            try {
+                var parsed = JSON.parse(hyprTouchQueryProc.stdout.text.trim())
+                var touchDevices = root._hyprTouchDevices(parsed)
+                root._hyprTouchApplyNames = root._matchingHyprTouchNames(touchDevices, root._hyprTouchActiveOutputName)
+                root._hyprTouchApplyIndex = 0
+                root._hyprTouchFailedNames = []
+
+                if (!root._hyprTouchApplyNames.length) {
+                    root._hyprTouchActiveOutputName = ""
+                    root._hyprTouchActiveTarget = ""
+                    root._syncHyprTouchTransformQueue()
+                    return
+                }
+
+                root._startNextHyprTouchApply()
+            } catch (error) {
+                console.warn("2-in-1-tools: failed to parse Hyprland devices JSON for touch sync:", error)
+                root._hyprTouchActiveOutputName = ""
+                root._hyprTouchActiveTarget = ""
+                root._syncHyprTouchTransformQueue()
+            }
+        }
+    }
+
+    Process {
+        id: hyprTouchApplyProc
+        stderr: StdioCollector {}
+
+        onExited: (exitCode, exitStatus) => {
+            var name = root._hyprTouchApplyNames[root._hyprTouchApplyIndex]
+            if (exitCode !== 0 && name)
+                root._hyprTouchFailedNames = root._hyprTouchFailedNames.concat([name])
+
+            root._hyprTouchApplyIndex += 1
+            if (root._startNextHyprTouchApply())
+                return
+
+            if (root._hyprTouchFailedNames.length) {
+                console.warn("2-in-1-tools: failed to sync Hyprland touch transform for:", root._hyprTouchFailedNames.join(", "))
+                var detail = hyprTouchApplyProc.stderr.text.trim()
+                if (detail)
+                    console.warn("2-in-1-tools: touch sync error:", detail)
+            }
+
+            root._hyprTouchApplyNames = []
+            root._hyprTouchApplyIndex = 0
+            root._hyprTouchFailedNames = []
+            root._hyprTouchActiveOutputName = ""
+            root._hyprTouchActiveTarget = ""
+            root._syncHyprTouchTransformQueue()
+        }
+    }
+
+    Process {
         id: tabletModeProc
         stdout: StdioCollector {}
 
@@ -525,20 +1042,83 @@ Item {
             if (exitCode !== 0)
                 return
 
-            var value = tabletModeProc.stdout.text.trim().toLowerCase()
-            root._syncTabletModeState(value === "on" || value === "true" || value === "1")
+            var raw = tabletModeProc.stdout.text.trim()
+            var state = root._parseStateBool(raw)
+            if (state !== null) {
+                root._syncTabletModeState(state)
+                return
+            }
+
+            if (root.compositorBackend !== "hyprland")
+                return
+
+            try {
+                var parsed = JSON.parse(raw)
+                var detected = root._tabletModeFromHyprDevices(parsed)
+                if (detected !== null)
+                    root._syncTabletModeState(detected)
+            } catch (error) {
+                console.warn("2-in-1-tools: failed to parse Hyprland devices JSON:", error)
+            }
         }
+    }
+
+    Process {
+        id: hyprEventProc
+        stdout: SplitParser {
+            onRead: data => root._processHyprEventData(data)
+        }
+
+        onExited: (exitCode, exitStatus) => {
+            if (root.compositorBackend === "hyprland")
+                hyprEventRestartTimer.restart()
+        }
+    }
+
+    Process {
+        id: niriStateWatchProc
+        stdout: SplitParser {
+            onRead: data => {
+                niriStateWatchDebounceTimer.restart()
+            }
+        }
+
+        onExited: (exitCode, exitStatus) => {
+            if (root.compositorBackend === "niri")
+                niriStateWatchRestartTimer.restart()
+        }
+    }
+
+    Timer {
+        id: hyprEventRestartTimer
+        interval: 1500
+        repeat: false
+        onTriggered: root._syncHyprEventListener()
+    }
+
+    Timer {
+        id: niriStateWatchRestartTimer
+        interval: 1500
+        repeat: false
+        onTriggered: root._syncNiriStateFileWatcher()
+    }
+
+    Timer {
+        id: niriStateWatchDebounceTimer
+        interval: 100
+        repeat: false
+        onTriggered: root.refreshTabletModeState()
     }
 
     Process {
         id: orientationProc
         stdout: SplitParser {
             onRead: data => {
-                var match = /Accelerometer orientation(?: changed)?:\s*([a-z-]+)/i.exec(data)
-                if (!match)
+                var orientation = root._extractOrientationFromText(data)
+                if (!orientation)
                     return
 
-                var target = root._orientationToTransform(match[1])
+                var target = root._orientationToTransform(orientation)
                 if (!target)
                     return
 
@@ -551,11 +1131,35 @@ Item {
         }
     }
 
+    Process {
+        id: orientationPollProc
+        stdout: StdioCollector {}
+
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0)
+                return
+
+            var orientation = root._extractOrientationFromText(orientationPollProc.stdout.text)
+            if (!orientation)
+                return
+
+            var target = root._orientationToTransform(orientation)
+            if (!target)
+                return
+
+            root._setAutoRotatePendingTransform(target)
+        }
+    }
+
     onAutoRotateInTabletModeChanged: root._syncAutoRotateLifecycle()
-    onTabletModeStateFileChanged: root.refreshTabletModeState()
+    onTabletModeStateFileChanged: {
+        root._syncNiriStateFileWatcher()
+        root.refreshTabletModeState()
+    }
+    onCompositorBackendChanged: root._syncTabletModeWatchers()
 
     Timer {
-        interval: 2000
+        interval: root.compositorBackend === "unknown" ? 2000 : 10000
         running: true
         repeat: true
         triggeredOnStart: true
@@ -563,9 +1167,23 @@ Item {
     }
 
     Component.onDestruction: {
+        backendDetectProc.running = false
         tabletModeProc.running = false
         queryProc.running = false
         applyProc.running = false
         orientationProc.running = false
+        orientationPollProc.running = false
+        hyprEventProc.running = false
+        hyprEventRestartTimer.running = false
+        hyprTouchQueryProc.running = false
+        hyprTouchApplyProc.running = false
+        niriStateWatchProc.running = false
+        niriStateWatchRestartTimer.running = false
+        niriStateWatchDebounceTimer.running = false
+    }
+
+    Component.onCompleted: {
+        backendDetectProc.running = true
+        root._syncTabletModeWatchers()
     }
 }
