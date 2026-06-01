@@ -317,6 +317,11 @@ Item {
         if (!chunk)
             return
 
+        if (chunk.indexOf("\n") === -1) {
+            root._handleHyprEventLine(chunk)
+            return
+        }
+
         root._hyprEventBuffer += chunk
         var newlineIndex = root._hyprEventBuffer.indexOf("\n")
         while (newlineIndex !== -1) {
@@ -345,11 +350,12 @@ Item {
             "-c",
             "socket=\"$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock\"; if [ ! -S \"$socket\" ]; then exit 1; fi; if command -v socat >/dev/null 2>&1; then exec socat -u UNIX-CONNECT:\"$socket\" -; elif command -v nc >/dev/null 2>&1; then exec nc -U \"$socket\"; else exit 1; fi"
         ]
+        root._log("starting Hyprland event listener")
         hyprEventProc.running = true
     }
 
     function _syncNiriStateFileWatcher() {
-        if (root.compositorBackend !== "niri") {
+        if (!root._isBackendSupported()) {
             niriStateWatchProc.running = false
             return
         }
@@ -364,6 +370,7 @@ Item {
             "2-in-1-tools",
             root.tabletModeStateFile
         ]
+        root._log("starting tablet mode state file watcher")
         niriStateWatchProc.running = true
     }
 
@@ -1137,6 +1144,7 @@ Item {
         }
 
         onExited: (exitCode, exitStatus) => {
+            root._log("Hyprland event listener exited; code=" + exitCode)
             if (root.compositorBackend === "hyprland")
                 hyprEventRestartTimer.restart()
         }
@@ -1151,7 +1159,8 @@ Item {
         }
 
         onExited: (exitCode, exitStatus) => {
-            if (root.compositorBackend === "niri")
+            root._log("tablet mode state file watcher exited; code=" + exitCode)
+            if (root._isBackendSupported())
                 niriStateWatchRestartTimer.restart()
         }
     }
@@ -1234,10 +1243,13 @@ Item {
         root._syncNiriStateFileWatcher()
         root.refreshTabletModeState()
     }
-    onCompositorBackendChanged: root._syncTabletModeWatchers()
+    onCompositorBackendChanged: {
+        root._syncTabletModeWatchers()
+        root.refreshTabletModeState()
+    }
 
     Timer {
-        interval: root.compositorBackend === "unknown" ? 2000 : 10000
+        interval: root.compositorBackend === "unknown" ? 2000 : root.compositorBackend === "hyprland" ? 2000 : 10000
         running: true
         repeat: true
         triggeredOnStart: true

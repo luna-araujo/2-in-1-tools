@@ -79,7 +79,7 @@ niri msg action load-config-file
 
 ### Hyprland setup
 
-`2-in-1-tools` listens to Hyprland's event socket (`.socket2.sock`) for `switch` events so tablet mode updates immediately. It also keeps polling as a low-frequency fallback and still supports `/tmp/noctalia-tablet-mode`.
+`2-in-1-tools` listens to Hyprland's event socket (`.socket2.sock`) for `switch` events when Hyprland emits them. It also watches `/tmp/noctalia-tablet-mode` with `inotifywait`, which is the most reliable event path on hardware that exposes `Intel HID switches` without readable state. A short fallback poll remains for missed events or missing `inotifywait`.
 
 Use Hyprland binds/switch handlers to keep the state file updated:
 
