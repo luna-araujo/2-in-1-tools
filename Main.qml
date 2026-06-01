@@ -52,10 +52,35 @@ Item {
     property var _hyprTouchApplyNames: []
     property int _hyprTouchApplyIndex: 0
     property var _hyprTouchFailedNames: []
+    property var _logQueue: []
 
 
     function _copyMap(map) {
         return Object.assign({}, map || {})
+    }
+
+    function _log(message) {
+        var next = root._logQueue.slice()
+        next.push(new Date().toISOString() + " " + message)
+        root._logQueue = next
+        root._syncLogQueue()
+    }
+
+    function _syncLogQueue() {
+        if (debugLogProc.running || !root._logQueue.length)
+            return
+
+        var next = root._logQueue.slice()
+        var line = next.shift()
+        root._logQueue = next
+        debugLogProc.command = [
+            "sh",
+            "-c",
+            "printf '%s\n' \"$1\" >> /tmp/2-in-1-tools.log",
+            "2-in-1-tools",
+            line
+        ]
+        debugLogProc.running = true
     }
 
     function _backendName() {
@@ -74,6 +99,7 @@ Item {
         if (root._backendUnsupportedNotified)
             return
         root._backendUnsupportedNotified = true
+        root._log("unsupported backend notification shown; backend=" + root.compositorBackend)
         ToastService.showError("2-in-1-tools supports Niri and Hyprland only")
     }
 
@@ -623,7 +649,10 @@ Item {
             return false
 
         if (!root._isBackendSupported()) {
-            root._notifyUnsupportedBackendOnce()
+            if (root.compositorBackend !== "unknown")
+                root._notifyUnsupportedBackendOnce()
+            else
+                root._log("suppressed output query while backend is unknown; reason=" + reason + "; output=" + outputName)
             return false
         }
 
@@ -694,7 +723,10 @@ Item {
             return false
 
         if (!root._isBackendSupported()) {
-            root._notifyUnsupportedBackendOnce()
+            if (root.compositorBackend !== "unknown")
+                root._notifyUnsupportedBackendOnce()
+            else
+                root._log("suppressed transform apply while backend is unknown; output=" + outputName)
             return false
         }
 
@@ -869,8 +901,14 @@ Item {
             var detected = backendDetectProc.stdout.text.trim().toLowerCase()
             if (detected !== "hyprland" && detected !== "niri")
                 detected = "unknown"
+            root._log("backend detected: " + detected)
             root.compositorBackend = detected
         }
+    }
+
+    Process {
+        id: debugLogProc
+        onExited: (exitCode, exitStatus) => root._syncLogQueue()
     }
 
     Process {
@@ -1177,12 +1215,14 @@ Item {
         hyprEventRestartTimer.running = false
         hyprTouchQueryProc.running = false
         hyprTouchApplyProc.running = false
+        debugLogProc.running = false
         niriStateWatchProc.running = false
         niriStateWatchRestartTimer.running = false
         niriStateWatchDebounceTimer.running = false
     }
 
     Component.onCompleted: {
+        root._log("main component completed; initial backend=" + root.compositorBackend)
         backendDetectProc.running = true
         root._syncTabletModeWatchers()
     }
